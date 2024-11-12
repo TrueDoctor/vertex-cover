@@ -121,6 +121,7 @@ impl Graph {
             graph: &Graph,
             selected: Bits,
             vertices: &[u32],
+            global_min: &mut u32,
             mut min: u32,
             ones: u32,
         ) -> (u32, Bits) {
@@ -129,8 +130,8 @@ impl Graph {
             }
             let n = vertices[0];
             let vertices = &vertices[1..];
-            if ones > min {
-                return (min + 1, selected);
+            if ones > *global_min {
+                return (*global_min + 1, selected);
             }
             let mut covered = selected[n as usize];
             let neighbours = graph.neighbours(n);
@@ -138,14 +139,16 @@ impl Graph {
                 covered |= selected[neighbour as usize];
             }
             if covered {
-                return compute_cover_inner(graph, selected, vertices, min, ones);
+                return compute_cover_inner(graph, selected, vertices, global_min, min, ones);
             }
             let mut first = selected;
             first.set(n as usize, true);
             let (first_result, mut min_vec) =
-                compute_cover_inner(graph, first, vertices, min, ones + 1);
-            if first_result < min {
+                compute_cover_inner(graph, first, vertices, global_min, min, ones + 1);
+            if first_result < *global_min {
+                eprintln!("updating min from {} to {}", min, first_result);
                 min = first_result;
+                *global_min = min;
             }
 
             let mut second = selected;
@@ -153,11 +156,19 @@ impl Graph {
             for &neighbour in graph.neighbours(n) {
                 second.set(neighbour as usize, true);
             }
-            let (result, second) =
-                compute_cover_inner(graph, second, vertices, min, ones + neighbours.len() as u32);
-            if result < min {
+            let (result, second) = compute_cover_inner(
+                graph,
+                second,
+                vertices,
+                global_min,
+                min,
+                ones + neighbours.len() as u32,
+            );
+            if result < *global_min {
+                eprintln!("updating min from {} to {}", min, result);
                 min = result;
                 min_vec = second;
+                *global_min = min;
             }
 
             (min, min_vec)
@@ -195,8 +206,14 @@ impl Graph {
         let mut order: Vec<u32> = (1..=self.vertices).collect();
 
         order.sort_by_key(|i| std::cmp::Reverse(self.neighbours(*i).len()));
-        let (min, vec) =
-            compute_cover_inner(self, empty, &order, u32::MAX, empty.count_ones() as u32);
+        let (min, vec) = compute_cover_inner(
+            self,
+            empty,
+            &order,
+            &mut (self.vertices / 2),
+            u32::MAX,
+            empty.count_ones() as u32,
+        );
         dbg!(min);
         Cover::from(vec)
     }
