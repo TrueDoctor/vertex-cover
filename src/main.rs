@@ -1,12 +1,17 @@
 use bitvec::{field::BitField, prelude::*};
-use std::io::{BufRead, BufReader};
+use std::{
+    fmt::Write,
+    io::{BufRead, BufReader},
+};
 
 fn main() {
     // let graph = parse_input(std::io::stdin().lock());
-    let graph = parse_input(BufReader::new(std::fs::File::open("graph2.in").unwrap()));
+    let graph = parse_input(BufReader::new(std::fs::File::open("graph0.in").unwrap()));
     // dbg!(graph);
     let cover = graph.compute_cover();
-    dbg!(cover);
+    // dbg!(cover);
+    dbg!(graph.validate_cover(&cover));
+    std::fs::write("cover", cover.format());
     println!("Hello, world!");
 }
 
@@ -62,6 +67,14 @@ impl Cover {
             vertecies: (1..=n).collect(),
         }
     }
+    fn format(&self) -> String {
+        let mut output = String::new();
+        let _ = writeln!(&mut output, "{}", self.vertecies.len());
+        for vertex in &self.vertecies {
+            let _ = writeln!(&mut output, "{}", vertex);
+        }
+        output
+    }
 }
 
 impl From<Bits> for Cover {
@@ -76,15 +89,12 @@ type Bits = BitArray<[u64; 5]>;
 
 impl Graph {
     fn validate_cover(&self, cover: &Cover) -> bool {
-        let mut covered = vec![false; self.vertices as usize];
-        for &vertex in &cover.vertecies {
-            covered[vertex as usize - 1] = true;
-            for &neighbour in self.neighbours(vertex) {
-                covered[neighbour as usize - 1] = true;
+        for (start, end) in &self.edges {
+            if !(cover.vertecies.contains(start) || cover.vertecies.contains(end)) {
+                return false;
             }
         }
-
-        covered.iter().all(|&x| x)
+        true
     }
 
     fn populate_neighbours(&mut self) {
@@ -109,6 +119,12 @@ impl Graph {
             }
         }
         self.neighbour_indices.push(self.neighbours.len() as u32);
+
+        for (s, e) in &self.edges {
+            if !self.neighbours(*s).contains(e) || !self.neighbours(*e).contains(s) {
+                panic!();
+            }
+        }
     }
     fn neighbours(&self, vertex: u32) -> &[u32] {
         let start = self.neighbour_indices[vertex as usize - 1] as usize;
@@ -121,54 +137,64 @@ impl Graph {
             graph: &Graph,
             selected: Bits,
             vertices: &[u32],
-            global_min: &mut u32,
             mut min: u32,
             ones: u32,
         ) -> (u32, Bits) {
+            // eprintln!("{:?}", vertices);
             if vertices.is_empty() {
+                #[cfg(debug_assertions)]
+                let cover = Cover::from(selected);
+                #[cfg(debug_assertions)]
+                debug_assert!(graph.validate_cover(&cover));
                 return (ones, selected);
             }
             let n = vertices[0];
             let vertices = &vertices[1..];
-            if ones > *global_min {
-                return (*global_min + 1, selected);
+            if ones > min {
+                // eprintln!("aborting with {} selected elements", ones);
+                return (min + 1, selected);
             }
-            let mut covered = selected[n as usize];
+            let covered = selected[n as usize];
             let neighbours = graph.neighbours(n);
-            for &neighbour in neighbours {
-                covered |= selected[neighbour as usize];
-            }
-            if covered {
-                return compute_cover_inner(graph, selected, vertices, global_min, min, ones);
-            }
+            let all = neighbours.iter().all(|n| selected[*n as usize]);
             let mut first = selected;
-            first.set(n as usize, true);
+            if covered {
+                // eprintln!("skipping {n} because it is already covered");
+                return compute_cover_inner(graph, selected, vertices, min, ones);
+            }
+            let set = if !all {
+                first.set(n as usize, true);
+                1
+            } else {
+                0
+            };
+            // eprintln!("setting {}", n);
+            // for neighbour in neighbours {
+            //     eprintln!("n{}", neighbour);
+            // }
             let (first_result, mut min_vec) =
-                compute_cover_inner(graph, first, vertices, global_min, min, ones + 1);
-            if first_result < *global_min {
-                eprintln!("updating min from {} to {}", min, first_result);
+                compute_cover_inner(graph, first, vertices, min, ones + set);
+            if first_result < min {
+                // eprintln!("updating min from {} to {}", min, first_result);
                 min = first_result;
-                *global_min = min;
             }
 
             let mut second = selected;
             let neighbours = graph.neighbours(n);
+            let mut neighbour_count = neighbours.len() as u32;
             for &neighbour in graph.neighbours(n) {
+                // eprintln!("setting {}", neighbour);
+                if second[neighbour as usize] {
+                    neighbour_count -= 1;
+                }
                 second.set(neighbour as usize, true);
             }
-            let (result, second) = compute_cover_inner(
-                graph,
-                second,
-                vertices,
-                global_min,
-                min,
-                ones + neighbours.len() as u32,
-            );
-            if result < *global_min {
-                eprintln!("updating min from {} to {}", min, result);
+            let (result, second) =
+                compute_cover_inner(graph, second, vertices, min, ones + neighbour_count);
+            if result < min {
+                // eprintln!("updating min from {} to {}", min, result);
                 min = result;
                 min_vec = second;
-                *global_min = min;
             }
 
             (min, min_vec)
@@ -181,16 +207,16 @@ impl Graph {
             match self.neighbours(i) {
                 [] => empty.set(i as usize, true),
                 &[n] => {
-                    eprintln!("hit rule 1");
+                    // eprintln!("hit rule 1");
                     empty.set(n as usize, true)
                 }
                 &[a, b] if self.neighbours(a).contains(&b) => {
-                    eprintln!("hit rule 2.1");
+                    // eprintln!("hit rule 2.1");
                     empty.set(a as usize, true);
                     empty.set(b as usize, true);
                 }
                 &[a, b] if self.neighbours(a).len() == 2 && self.neighbours(b).len() == 2 => {
-                    eprintln!("hit rule 2.3");
+                    // eprintln!("hit rule 2.3");
                     let intersection = self
                         .neighbours(a)
                         .iter()
@@ -206,14 +232,8 @@ impl Graph {
         let mut order: Vec<u32> = (1..=self.vertices).collect();
 
         order.sort_by_key(|i| std::cmp::Reverse(self.neighbours(*i).len()));
-        let (min, vec) = compute_cover_inner(
-            self,
-            empty,
-            &order,
-            &mut (self.vertices / 2),
-            u32::MAX,
-            empty.count_ones() as u32,
-        );
+        let max = self.vertices.min(self.edges.len() as u32);
+        let (min, vec) = compute_cover_inner(self, empty, &order, max, empty.count_ones() as u32);
         dbg!(min);
         Cover::from(vec)
     }
