@@ -33,6 +33,7 @@
             kcachegrind
             cargo-flamegraph
             cargo-nextest
+            cargo-show-asm
             samply
           ];
           nativeBuildInputs = with pkgs; [

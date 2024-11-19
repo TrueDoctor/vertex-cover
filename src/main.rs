@@ -54,9 +54,10 @@ fn parse_edge(line: &str) -> (u32, u32) {
 struct Graph {
     edges: Vec<(u32, u32)>,
     neighbours: Vec<u32>,
+    neighbour_bits: Vec<Bits>,
     neighbour_indices: Vec<u32>,
     vertices: u32,
-    branches: Vec<SmallVec<[Bits; 3]>>,
+    branches: Vec<SmallVec<[(Bits, Bits); 3]>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -89,12 +90,13 @@ impl From<Bits> for Cover {
     }
 }
 
-type Bits = BitArray<[u64; 5]>;
+type Bits = BitArray<[u64; 4]>;
 
 impl Graph {
     fn validate_cover(&self, cover: &Cover) -> bool {
         for (start, end) in &self.edges {
             if !(cover.vertecies.contains(start) || cover.vertecies.contains(end)) {
+                eprintln!("edge ({start}, {end}) not covered");
                 return false;
             }
         }
@@ -129,12 +131,22 @@ impl Graph {
                 panic!();
             }
         }
+        for i in 1..=self.vertices {
+            let mut bits = Bits::default();
+            for n in self.neighbours(i) {
+                bits.set(*n as usize, true);
+            }
+            self.neighbour_bits.push(bits);
+        }
     }
 
     fn neighbours(&self, vertex: u32) -> &[u32] {
         let start = self.neighbour_indices[vertex as usize - 1] as usize;
         let end = self.neighbour_indices[vertex as usize] as usize;
         &self.neighbours[start..end]
+    }
+    fn neighbour_bits(&self, vertex: u32) -> Bits {
+        self.neighbour_bits[vertex as usize - 1]
     }
 
     fn populate_branches(&mut self) {
@@ -144,53 +156,114 @@ impl Graph {
         }
         self.branches = branches;
     }
-    fn compute_branches(&self, n: u32) -> SmallVec<[Bits; 3]> {
-        let select = |values: &[u32]| {
+    fn compute_branches(&self, v: u32) -> SmallVec<[(Bits, Bits); 3]> {
+        let select = |values: &[u32], covered: &[u32]| {
             let mut values = values.to_vec();
             values.sort_unstable();
             values.dedup();
+            let mut covered = covered.to_vec();
+            covered.sort_unstable();
+            covered.dedup();
             let mut bits = Bits::default();
+            let mut processed = Bits::default();
             for value in &values {
                 bits.set(*value as usize, true);
+                processed.set(*value as usize, true);
             }
-            bits
+            for value in &covered {
+                processed.set(*value as usize, true);
+            }
+            (bits, processed)
         };
-        let neighbours = self.neighbours(n);
+        let neighbours = self.neighbours(v);
+
+        let case3_2 = |a, b| self.connected(a, b);
+        let select3_2 = |a, b, c| {
+            eprintln!("hit rule 3.2");
+            smallvec![select(&[a, b, c], &[v]), select(self.neighbours(c), &[c])]
+        };
+        let case3_3 = |a, b| self.intersect(a, b).count_ones() >= 2;
+        let select3_3 = |a, b, c| {
+            eprintln!("hit rule 3.3");
+            let mut neighbours = self.intersect(a, b);
+            neighbours.set(v as usize, false);
+            let common_neighbour = neighbours.iter_ones().next().unwrap();
+            smallvec![
+                select(&[v, common_neighbour as u32], &[]),
+                select(&[a, b, c], &[v])
+            ]
+        };
 
         match neighbours {
-            [] => smallvec![select(&[n])],
-            &[neighbour] => smallvec![select(&[neighbour])],
-            &[a, b] if self.neighbours(a).contains(&b) => {
-                // eprintln!("hit rule 2.1");
-                smallvec![select(&[a, b])]
+            [] => smallvec![select(&[v], &[])],
+            // This  would break with two conected vertecies of degree 1
+            &[neighbour] => {
+                eprintln!("hit rule 1");
+                // eprintln!("selecting {neighbour}");
+                smallvec![select(&[neighbour], &[v])]
             }
-            &[a, b] if self.neighbours(a).len() == 2 && self.neighbours(b).len() == 2 => {
-                // eprintln!("hit rule 2.3");
-                let intersection = self
-                    .neighbours(a)
-                    .iter()
-                    .find(|n| self.neighbours(b).contains(n))
-                    .unwrap();
-                smallvec![select(&[n, *intersection])]
+            &[a, b] if self.connected(a, b) => {
+                eprintln!("hit rule 2.1");
+                smallvec![select(&[a, b], &[v])]
             }
-            &[a, b] if self.neighbours(a).len() >= 2 && self.neighbours(b).len() >= 2 => {
-                // eprintln!("hit rule 2.2");
+            &[a, b]
+                if self.deg(a) == 2
+                    && self.deg(b) == 2
+                    && self.intersect(a, b).count_ones() == 2 =>
+            {
+                eprintln!("hit rule 2.3");
+                let intersection: Vec<u32> =
+                    self.intersect(a, b).iter_ones().map(|x| x as u32).collect();
+                smallvec![select(&intersection, &[a, b])]
+            }
+            &[a, b] if self.deg(a) >= 2 && self.deg(b) >= 2 => {
+                eprintln!("hit rule 2.2");
                 let mut neighbours = self.neighbours(a).to_vec();
                 neighbours.extend_from_slice(self.neighbours(b));
-                smallvec![select(&[a, b]), select(&neighbours)]
+                smallvec![select(&[a, b], &[v]), select(&neighbours, &[])]
             }
-            // &[a, b, c] if self.neighbours(a).contains(&b) => {
-            //     // eprintln!("hit rule 2.1");
-            //     smallvec![select(&[a, b])]
-            // }
-            _ => smallvec![select(&[n]), select(neighbours),],
+            &[a, b, c]
+                if self.intersect(a, b).count_ones() == 1
+                    && self.intersect(b, c).count_ones() == 1
+                    && self.intersect(a, c).count_ones() == 1 =>
+            {
+                eprintln!("hit rule 3.1");
+                let mut neighbours = vec![v, a];
+                neighbours.extend_from_slice(self.neighbours(b));
+                neighbours.extend_from_slice(self.neighbours(c));
+                smallvec![
+                    select(&neighbours, &[b, c]),
+                    select(&[a, b, c], &[v]),
+                    select(self.neighbours(a), &[a])
+                ]
+            }
+            &[a, b, c] if case3_2(a, b) => select3_2(a, b, c),
+            &[b, c, a] if case3_2(a, b) => select3_2(a, b, c),
+            &[c, a, b] if case3_2(a, b) => select3_2(a, b, c),
+            &[a, b, c] if case3_3(a, b) => select3_3(a, b, c),
+            &[b, c, a] if case3_3(a, b) => select3_3(a, b, c),
+            &[c, a, b] if case3_3(a, b) => select3_3(a, b, c),
+            _ => smallvec![select(&[v], &[]), select(neighbours, &[v]),],
         }
+    }
+
+    fn connected(&self, a: u32, b: u32) -> bool {
+        self.neighbour_bits(a)[b as usize]
+    }
+
+    fn deg(&self, a: u32) -> usize {
+        self.neighbours(a).len()
+    }
+
+    fn intersect(&self, a: u32, b: u32) -> Bits {
+        self.neighbour_bits(a) & self.neighbour_bits(b)
     }
 
     fn compute_cover(&self) -> Cover {
         fn compute_cover_inner(
             graph: &Graph,
             selected: Bits,
+            mut finished: Bits,
             vertices: &[u32],
             mut min: u32,
             ones: u32,
@@ -213,23 +286,28 @@ impl Graph {
                 // eprintln!("aborting with {} selected elements", ones);
                 return (min + 1, selected);
             }
-            if selected[n as usize] {
+            if (graph.neighbour_bits(n) & !selected) == Bits::default() {
+                finished.set(n as usize, true);
+            }
+            if finished[n as usize] {
                 // eprintln!("skipping {n} because it is already covered");
-                return compute_cover_inner(graph, selected, vertices, min, ones);
+                return compute_cover_inner(graph, selected, finished, vertices, min, ones);
             }
 
             let mut cover = selected;
-            for new_bits in &graph.branches[n as usize - 1] {
+            for (new_bits, covered) in &graph.branches[n as usize - 1] {
                 // eprintln!("new_bits for {n}: {:?}", new_bits);
                 // dbg!(new_bits.count_ones());
                 // dbg!(selected.count_ones());
                 // eprintln!("current: {:?}", selected);
                 let new_selection = *new_bits | selected;
+                let new_cover = *covered | finished;
                 // eprintln!("combined: {:?}", new_selection);
                 // dbg!(new_selection.count_ones());
                 let (result, min_vec) = compute_cover_inner(
                     graph,
                     new_selection,
+                    new_cover,
                     vertices,
                     min,
                     new_selection.count_ones() as u32,
@@ -244,21 +322,36 @@ impl Graph {
             (min, cover)
         }
 
-        let mut empty = bitarr![u64, Lsb0; 0; 301];
+        let mut selection = bitarr![u64, Lsb0; 0; 256];
+        let mut covered = bitarr![u64, Lsb0; 0; 256];
 
-        // Actual reduction rules from the lecture
+        // Actual reduction when only one choice is possible
         for i in 1..=self.vertices {
-            let &[selection] = self.branches[i as usize - 1].as_slice() else {
+            let &[(mut new_selection, new_covered)] = self.branches[i as usize - 1].as_slice()
+            else {
                 continue;
             };
-            empty |= selection;
+            new_selection &= !covered;
+            covered |= new_covered;
+            selection |= new_selection;
         }
 
         let mut order: Vec<u32> = (1..=self.vertices).collect();
+        dbg!(selection.count_ones());
+        dbg!(covered.count_ones());
+        // let covered_vec: Vec<usize> = covered.iter_ones().collect();
+        // eprintln!("covered: {:?}", &covered_vec);
 
         order.sort_by_key(|i| std::cmp::Reverse(self.neighbours(*i).len()));
         let max = self.vertices.min(self.edges.len() as u32);
-        let (min, vec) = compute_cover_inner(self, empty, &order, max, empty.count_ones() as u32);
+        let (min, vec) = compute_cover_inner(
+            self,
+            selection,
+            covered,
+            &order,
+            max,
+            selection.count_ones() as u32,
+        );
         dbg!(min);
         Cover::from(vec)
     }
@@ -280,7 +373,7 @@ mod test {
 
     #[test]
     fn test_graph0() {
-        test_graph("graph0.in");
+        assert_eq!(test_graph("graph0.in"), 35);
     }
     #[test]
     fn test_graph1() {
@@ -307,9 +400,10 @@ mod test {
         test_graph("graph6.in");
     }
 
-    fn test_graph(graph: &str) {
+    fn test_graph(graph: &str) -> u32 {
         let graph = parse_input(BufReader::new(std::fs::File::open(graph).unwrap()));
         let cover = graph.compute_cover();
         assert!(graph.validate_cover(&cover));
+        cover.vertecies.len() as u32
     }
 }
