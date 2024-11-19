@@ -1,13 +1,20 @@
 [package]
-name = "vertex_cover_assignment"
+name = "vertex-cover"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[lib]
+
 [dependencies]
 bitvec = "1.0.1"
 smallvec = "1.13.2"
+criterion = "0.4"
 
 [profile.release]
 debug = true
+
+[[bench]]
+name = "sample_graphs"
+harness = false

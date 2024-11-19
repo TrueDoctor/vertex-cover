@@ -18,7 +18,7 @@
         pkgs = import nixpkgs {
           inherit system overlays;
         };
-        toolchain = pkgs.rust-bin.stable.latest.default.override {
+        toolchain = pkgs.rust-bin.nightly.latest.default.override {
           extensions = ["rust-src" "clippy" "rust-analyzer"];
         };
         buildInputs = with pkgs; [
