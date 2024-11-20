@@ -132,6 +132,7 @@ impl Graph {
         }
         self.masks.clear();
         self.masks.push([0, 0, 0, 0]);
+        self.neighbour_bits.clear();
         for i in 1..=self.vertices {
             let mut bits = Bits::default();
             for n in self.neighbours(i) {
@@ -149,6 +150,7 @@ impl Graph {
         let mut order: Vec<u32> = (1..=self.vertices).collect();
 
         order.sort_by_key(|i| std::cmp::Reverse(self.neighbours(*i).len()));
+        // order.sort_by_key(|i| self.neighbours(*i).len());
         let mut reverse_lookup = vec![0; order.len() + 1];
         for (i, id) in order.iter().enumerate() {
             reverse_lookup[*id as usize] = i + 1;
@@ -227,20 +229,18 @@ impl Graph {
                 smallvec![select(&[neighbour], &[v])]
             }
             &[a, b] if self.connected(a, b) => {
-                // eprintln!("hit rule 2.1");
+                eprintln!("hit rule 2.1");
                 smallvec![select(&[a, b], &[v])]
             }
             &[a, b]
-                if self.deg(a) == 2
-                    && self.deg(b) == 2
-                    && self.intersect(a, b).count_ones() == 2 =>
+                if self.deg(a) == 2 && self.deg(b) == 2 && self.union(a, b).count_ones() == 2 =>
             {
                 eprintln!("hit rule 2.3");
                 let intersection: Vec<u32> =
-                    self.intersect(a, b).iter_ones().map(|x| x as u32).collect();
+                    self.union(a, b).iter_ones().map(|x| x as u32).collect();
                 smallvec![select(&intersection, &[a, b])]
             }
-            &[a, b] if self.deg(a) >= 2 && self.deg(b) >= 2 => {
+            &[a, b] if self.union(a, b).count_ones() >= 3 => {
                 eprintln!("hit rule 2.2");
                 let mut neighbours = self.neighbours(a).to_vec();
                 neighbours.extend_from_slice(self.neighbours(b));
@@ -282,107 +282,11 @@ impl Graph {
     fn intersect(&self, a: u32, b: u32) -> Bits {
         self.neighbour_bits(a) & self.neighbour_bits(b)
     }
+    fn union(&self, a: u32, b: u32) -> Bits {
+        self.neighbour_bits(a) | self.neighbour_bits(b)
+    }
 
     pub fn compute_cover(&self) -> Cover {
-        fn compute_cover_inner(
-            graph: &Graph,
-            selected: Bits,
-            mut finished: Bits,
-            vertices: &[u32],
-            mut min: u32,
-            ones: u32,
-            mut trailing_zeros_index: u8,
-        ) -> (u32, Bits) {
-            // dbg!(ones);
-            debug_assert_eq!(ones, selected.count_ones());
-            // eprintln!("{:?}", selected);
-
-            // iterate using trailing ones instruction and shuffle bit indices to match degree sorting
-            // let n = vertices[0];
-            // dbg!(ones);
-            if ones > min {
-                // eprintln!("aborting with {} selected elements", ones);
-                return (min + 1, selected);
-            }
-            // let vertices = &vertices[1..];
-            let finished_bytes = unsafe { (!finished).as_u64s() };
-            while finished_bytes[trailing_zeros_index as usize] == 0 {
-                trailing_zeros_index += 1;
-                if trailing_zeros_index == 4 {
-                    return (min + 1, selected);
-                }
-            }
-            // eprintln!("finsihed: {:?}", finished);
-            let trailing_zeros = finished_bytes[trailing_zeros_index as usize].trailing_zeros()
-                + trailing_zeros_index as u32 * 64;
-            let n = trailing_zeros;
-            // dbg!(trailing_zeros);
-            // if vertices.is_empty() {
-            // dbg!(n);
-            if n >= graph.vertices {
-                #[cfg(debug_assertions)]
-                let cover = Cover::from(selected);
-                // dbg!(ones);
-                #[cfg(debug_assertions)]
-                debug_assert!(graph.validate_cover(&cover));
-                return (ones, selected);
-            }
-            let mask = BitVec256::from_bit(trailing_zeros);
-            // let mask = unsafe { BitVec256::from_u64s(graph.masks[n as usize]) };
-            // if finished.get_mask(mask) {
-            //     // eprintln!("skipping {n} because it is already covered");
-            //     return compute_cover_inner(
-            //         graph,
-            //         selected,
-            //         finished,
-            //         vertices,
-            //         min,
-            //         ones,
-            //         leading_zeros_index,
-            //     );
-            // }
-            if graph.neighbour_bits(n).and_not(&selected).is_zero() {
-                finished.set_mask(mask);
-                return compute_cover_inner(
-                    graph,
-                    selected,
-                    finished,
-                    vertices,
-                    min,
-                    ones,
-                    trailing_zeros_index,
-                );
-            }
-
-            let mut cover = selected;
-            for (new_bits, covered) in &graph.branches[n as usize - 1] {
-                // eprintln!("new_bits for {n}: {:?}", new_bits);
-                // dbg!(new_bits.count_ones());
-                // dbg!(selected.count_ones());
-                // eprintln!("current: {:?}", selected);
-                let new_selection = *new_bits | selected;
-                let new_cover = *covered | finished;
-                // eprintln!("combined: {:?}", new_selection);
-                // dbg!(new_selection.count_ones());
-                let (result, min_vec) = compute_cover_inner(
-                    graph,
-                    new_selection,
-                    new_cover,
-                    vertices,
-                    min,
-                    new_selection.count_ones(),
-                    trailing_zeros_index,
-                );
-                if result < min {
-                    // eprintln!("updating min from {} to {}", min, result);
-                    min = result;
-                    cover = min_vec;
-                }
-            }
-
-            (min, cover)
-        }
-
         let mut selection: Bits = Default::default();
         let mut covered: Bits = Default::default();
 
@@ -398,26 +302,142 @@ impl Graph {
         }
         covered.set(0);
 
-        let mut order: Vec<u32> = (1..=self.vertices).collect();
-        // dbg!(selection.count_ones());
-        // dbg!(covered.count_ones());
-        // let covered_vec: Vec<usize> = covered.iter_ones().collect();
-        // eprintln!("covered: {:?}", &covered_vec);
+        // let mut best_min = self.vertices;
 
-        // order.sort_by_key(|i| std::cmp::Reverse(self.neighbours(*i).len()));
-        // dbg!(&order);
-        let max = self.vertices.min(self.edges.len() as u32);
-        let (min, vec) = compute_cover_inner(
-            self,
-            selection,
-            covered,
-            &order,
-            max,
-            selection.count_ones() as u32,
-            0,
-        );
-        // dbg!(min);
-        Cover::from(vec)
+        // let mut best_cover = None;
+        // for i in (self.vertices / 2)..(self.vertices) {
+        //     // dbg!(i);
+        //     let Some(cover) = self.compute_bounded_cover(selection, covered, i) else {
+        //         continue;
+        //     };
+        //     best_cover = Some(cover);
+        //     break;
+        // }
+        let Some(best_cover) = self.compute_bounded_cover(selection, covered, self.vertices - 1)
+        else {
+            panic!();
+        };
+
+        Cover::from(best_cover)
+    }
+
+    fn compute_bounded_cover(
+        &self,
+        selection: BitVec256,
+        covered: BitVec256,
+        mut best_min: u32,
+    ) -> Option<BitVec256> {
+        #[derive(Clone)]
+        struct StackFrame {
+            selected: Bits,
+            finished: Bits,
+            trailing_zeros_index: u8,
+        }
+        let mut stack = Vec::with_capacity(100);
+
+        let mut best_cover = None;
+        let mut frame = StackFrame {
+            selected: selection,
+            finished: covered,
+            trailing_zeros_index: 0,
+        };
+        let mut i = 0u64;
+        loop {
+            i += 1;
+            if i % 100000000 == 0 {
+                // dbg!(stack.len());
+            }
+            let finished_bytes = unsafe { (!frame.finished).as_u64s() };
+            while finished_bytes[frame.trailing_zeros_index as usize] == 0 {
+                frame.trailing_zeros_index += 1;
+            }
+            let trailing_zeros = finished_bytes[frame.trailing_zeros_index as usize]
+                .trailing_zeros()
+                + frame.trailing_zeros_index as u32 * 64;
+            let n = trailing_zeros;
+
+            let ones = frame.selected.count_ones();
+            if ones > best_min || n >= self.vertices {
+                if ones < best_min {
+                    // eprintln!("updating min from {} to {}", best_min, ones);
+                    best_min = ones;
+                    best_cover = Some(frame.selected);
+                }
+                let Some(new_frame) = stack.pop() else {
+                    break;
+                };
+                frame = new_frame;
+                continue;
+            }
+
+            if self.neighbour_bits(n).and_not(&frame.selected).is_zero() {
+                frame.finished.set(n as usize);
+                continue;
+            }
+
+            let branches = &self.branches[n as usize - 1];
+            let first = branches[0];
+            let branches = branches.iter().skip(1);
+            for (new_bits, covered) in branches {
+                let new_selection = *new_bits | frame.selected;
+                let new_cover = *covered | frame.finished;
+
+                stack.push(StackFrame {
+                    selected: new_selection,
+                    finished: new_cover,
+                    trailing_zeros_index: frame.trailing_zeros_index,
+                });
+            }
+            frame.selected |= first.0;
+            frame.finished |= first.1;
+        }
+        best_cover
+    }
+
+    fn apply_reductions(&mut self) -> Vec<u32> {
+        let mut vertex_cover = Vec::new();
+        let mut modified = true;
+
+        while modified {
+            modified = false;
+
+            // Apply degree-1 reduction
+            for v in 1..=self.vertices {
+                if let &[neighbour] = self.neighbours(v) {
+                    // Take the single neighbor instead of v
+                    vertex_cover.push(neighbour);
+                    // Remove both vertices and their edges
+                    self.edges
+                        .retain(|&(a, b)| a != v && b != v && a != neighbour && b != neighbour);
+                    self.populate_neighbours();
+                    modified = true;
+                    break;
+                }
+            }
+
+            // Apply dominance rule
+            if !modified {
+                'outer: for v in 1..=self.vertices {
+                    let v_neighbors = self.neighbour_bits(v);
+
+                    // Check if v dominates any of its neighbors
+                    for &u in self.neighbours(v) {
+                        let u_neighbors = self.neighbour_bits(u);
+
+                        // Check if N[u] ⊆ N[v] using BitVec operations
+                        if u_neighbors.and_not(&v_neighbors).is_zero() {
+                            vertex_cover.push(v);
+                            self.edges.retain(|&(a, b)| a != v && b != v);
+                            self.populate_neighbours();
+                            modified = true;
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+
+        vertex_cover
     }
 }
 
