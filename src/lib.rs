@@ -31,10 +31,7 @@ pub fn parse_input(reader: impl BufRead) -> Graph {
         vertices: vertex_count,
         ..Default::default()
     };
-    graph.populate_neighbours();
-    graph.reorder_ids();
-    graph.populate_neighbours();
-    graph.populate_branches();
+    graph.init();
     graph
 }
 
@@ -55,6 +52,8 @@ pub struct Graph {
     vertices: u32,
     id_map: Vec<u32>,
     branches: Vec<SmallVec<[(Bits, Bits); 3]>>,
+    component_mask: Bits,
+    removed: Bits,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -69,6 +68,7 @@ impl Cover {
             vertecies: (1..=n).collect(),
         }
     }
+
     pub fn format(&self) -> String {
         let mut output = String::new();
         let _ = writeln!(&mut output, "{}", self.vertecies.len());
@@ -100,10 +100,21 @@ impl Graph {
         }
         true
     }
+    fn init(&mut self) {
+        self.populate_neighbours();
+        self.reorder_ids();
+        self.populate_neighbours();
+        self.populate_branches();
+        for i in 1..=self.vertices {
+            self.component_mask.set(i as usize);
+        }
+    }
 
     fn populate_neighbours(&mut self) {
         self.neighbours.clear();
         self.neighbour_indices.clear();
+        self.masks.clear();
+        self.neighbour_bits.clear();
         fn neighbours<'a>(
             edges: &'a [(u32, u32)],
             vertex: &'a u32,
@@ -116,7 +127,6 @@ impl Graph {
                     _ => None,
                 })
         }
-        self.neighbour_indices.clear();
         for i in 1..=self.vertices {
             self.neighbour_indices.push(self.neighbours.len() as u32);
             for neighbour in neighbours(&self.edges, &i) {
@@ -130,9 +140,7 @@ impl Graph {
                 panic!();
             }
         }
-        self.masks.clear();
         self.masks.push([0, 0, 0, 0]);
-        self.neighbour_bits.clear();
         for i in 1..=self.vertices {
             let mut bits = Bits::default();
             for n in self.neighbours(i) {
@@ -182,7 +190,7 @@ impl Graph {
     }
 
     #[inline(never)]
-    fn compute_branches(&self, v: u32) -> SmallVec<[(Bits, Bits); 3]> {
+    fn compute_branches(&mut self, v: u32) -> SmallVec<[(Bits, Bits); 3]> {
         let select = |values: &[u32], covered: &[u32]| {
             let mut values = values.to_vec();
             values.sort_unstable();
@@ -226,11 +234,28 @@ impl Graph {
             &[neighbour] => {
                 eprintln!("hit rule 1");
                 // eprintln!("selecting {neighbour}");
+                // self.removed |= Bits::from_bit(v);
+                // self.removed |= Bits::from_bit(neighbour);
                 smallvec![select(&[neighbour], &[v])]
             }
             &[a, b] if self.connected(a, b) => {
                 eprintln!("hit rule 2.1");
+                // self.removed |= Bits::from_bit(a);
+                // self.removed |= Bits::from_bit(b);
+                // self.removed |= Bits::from_bit(v);
                 smallvec![select(&[a, b], &[v])]
+            }
+            neigh
+                if neigh.iter().any(|n| {
+                    self.neighbour_bits(*n)
+                        .and_not(&(self.neighbour_bits(v) | Bits::from_bit(v)))
+                        .is_zero()
+                        && !self.removed[*n as usize]
+                }) =>
+            {
+                eprintln!("hit dominance rule");
+                self.removed |= Bits::from_bit(v);
+                smallvec![select(&[v], &[])]
             }
             &[a, b]
                 if self.deg(a) == 2 && self.deg(b) == 2 && self.union(a, b).count_ones() == 2 =>
@@ -287,8 +312,11 @@ impl Graph {
     }
 
     pub fn compute_cover(&self) -> Cover {
-        let mut selection: Bits = Default::default();
-        let mut covered: Bits = Default::default();
+        let components = self.find_connected_components();
+        // let components = &[self];
+
+        let mut selection: Bits = self.removed;
+        let mut covered: Bits = self.removed;
 
         // Actual reduction when only one choice is possible
         for i in 1..=self.vertices {
@@ -302,23 +330,34 @@ impl Graph {
         }
         covered.set(0);
 
-        // let mut best_min = self.vertices;
+        let mut final_cover = self.removed;
+        // dbg!(components.len());
+        for component in components {
+            let covered = covered | !component.component_mask;
+            // dbg!(covered.count_ones());
+            let Some(best_cover) =
+                component.compute_bounded_cover(selection, covered, component.vertices)
+            else {
+                dbg!(component.component_mask);
+                panic!("did not find cover");
+            };
+            // dbg!(best_cover.count_ones());
+            // dbg!(component.component_mask);
+            final_cover |= best_cover;
+        }
 
-        // let mut best_cover = None;
-        // for i in (self.vertices / 2)..(self.vertices) {
-        //     // dbg!(i);
-        //     let Some(cover) = self.compute_bounded_cover(selection, covered, i) else {
-        //         continue;
-        //     };
-        //     best_cover = Some(cover);
-        //     break;
-        // }
-        let Some(best_cover) = self.compute_bounded_cover(selection, covered, self.vertices - 1)
-        else {
-            panic!();
-        };
+        // dbg!(final_cover.count_ones());
+        // self.translate_cover(&Cover::from(final_cover))
+        Cover::from(final_cover)
+    }
 
-        Cover::from(best_cover)
+    pub fn translate_cover(&self, cover: &Cover) -> Cover {
+        let vertecies = cover
+            .vertecies
+            .iter()
+            .map(|&v| self.id_map[v as usize - 1])
+            .collect();
+        Cover { vertecies }
     }
 
     fn compute_bounded_cover(
@@ -342,14 +381,27 @@ impl Graph {
             trailing_zeros_index: 0,
         };
         let mut i = 0u64;
-        loop {
+        'outer: loop {
             i += 1;
             if i % 100000000 == 0 {
-                // dbg!(stack.len());
+                dbg!(stack.len());
             }
             let finished_bytes = unsafe { (!frame.finished).as_u64s() };
             while finished_bytes[frame.trailing_zeros_index as usize] == 0 {
                 frame.trailing_zeros_index += 1;
+                if frame.trailing_zeros_index == 4 {
+                    let ones = frame.selected.count_ones();
+                    if ones < best_min {
+                        // eprintln!("updating min from {} to {}", best_min, ones);
+                        best_min = ones;
+                        best_cover = Some(frame.selected);
+                    }
+                    let Some(new_frame) = stack.pop() else {
+                        break 'outer;
+                    };
+                    frame = new_frame;
+                    continue 'outer;
+                }
             }
             let trailing_zeros = finished_bytes[frame.trailing_zeros_index as usize]
                 .trailing_zeros()
@@ -357,12 +409,7 @@ impl Graph {
             let n = trailing_zeros;
 
             let ones = frame.selected.count_ones();
-            if ones > best_min || n >= self.vertices {
-                if ones < best_min {
-                    // eprintln!("updating min from {} to {}", best_min, ones);
-                    best_min = ones;
-                    best_cover = Some(frame.selected);
-                }
+            if ones > best_min {
                 let Some(new_frame) = stack.pop() else {
                     break;
                 };
@@ -394,50 +441,62 @@ impl Graph {
         best_cover
     }
 
-    fn apply_reductions(&mut self) -> Vec<u32> {
-        let mut vertex_cover = Vec::new();
-        let mut modified = true;
+    fn find_connected_components(&self) -> Vec<Graph> {
+        let mut visited = vec![false; self.vertices as usize + 1];
+        let mut components = Vec::new();
 
-        while modified {
-            modified = false;
+        for v in 1..=self.vertices {
+            if !visited[v as usize] {
+                // Find all vertices in this component using DFS
+                let mut component_vertices = Vec::new();
+                let mut stack = vec![v];
 
-            // Apply degree-1 reduction
-            for v in 1..=self.vertices {
-                if let &[neighbour] = self.neighbours(v) {
-                    // Take the single neighbor instead of v
-                    vertex_cover.push(neighbour);
-                    // Remove both vertices and their edges
-                    self.edges
-                        .retain(|&(a, b)| a != v && b != v && a != neighbour && b != neighbour);
-                    self.populate_neighbours();
-                    modified = true;
-                    break;
-                }
-            }
+                while let Some(current) = stack.pop() {
+                    if !visited[current as usize] && !self.removed[current as usize] {
+                        visited[current as usize] = true;
+                        component_vertices.push(current);
 
-            // Apply dominance rule
-            if !modified {
-                'outer: for v in 1..=self.vertices {
-                    let v_neighbors = self.neighbour_bits(v);
-
-                    // Check if v dominates any of its neighbors
-                    for &u in self.neighbours(v) {
-                        let u_neighbors = self.neighbour_bits(u);
-
-                        // Check if N[u] ⊆ N[v] using BitVec operations
-                        if u_neighbors.and_not(&v_neighbors).is_zero() {
-                            vertex_cover.push(v);
-                            self.edges.retain(|&(a, b)| a != v && b != v);
-                            self.populate_neighbours();
-                            modified = true;
-                            break 'outer;
+                        // Add all unvisited neighbors to stack
+                        for &neighbor in self.neighbours(current) {
+                            if !visited[neighbor as usize] {
+                                stack.push(neighbor);
+                            }
                         }
                     }
+                }
+
+                if !component_vertices.is_empty() {
+                    // Create subgraph for this component
+                    let mut component_edges = Vec::new();
+                    for &(start, end) in &self.edges {
+                        if component_vertices.contains(&start) && component_vertices.contains(&end)
+                        {
+                            component_edges.push((start, end));
+                        }
+                    }
+                    let mut component_mask = Bits::default();
+                    for &vertex in &component_vertices {
+                        component_mask.set(vertex as usize);
+                    }
+
+                    let mut neighbour_bits = self.neighbour_bits.clone();
+                    neighbour_bits
+                        .iter_mut()
+                        .for_each(|neigh| *neigh &= component_mask);
+
+                    let component = Graph {
+                        edges: component_edges,
+                        neighbour_bits,
+                        component_mask,
+                        ..self.clone()
+                    };
+                    // component.init();
+                    components.push(component);
                 }
             }
         }
 
-        vertex_cover
+        components
     }
 }
 
@@ -487,6 +546,7 @@ mod test {
     fn test_graph(graph: &str) -> u32 {
         let graph = parse_input(BufReader::new(std::fs::File::open(graph).unwrap()));
         let cover = graph.compute_cover();
+        dbg!(cover.vertecies.len() as u32);
         assert!(graph.validate_cover(&cover));
         cover.vertecies.len() as u32
     }

@@ -20,6 +20,7 @@ fn vertex_cover_benchmark(c: &mut Criterion) {
     benchmark_graph(c, "graph0");
     benchmark_graph(c, "graph3");
     benchmark_graph(c, "graph5");
+    benchmark_graph(c, "graph6");
 }
 
 criterion_group!(benches, vertex_cover_benchmark);
