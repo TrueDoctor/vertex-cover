@@ -1,5 +1,6 @@
 // use bitvec::{field::BitField, prelude::*};
 #![feature(stdarch_x86_avx512)]
+use bitvec::BitVec256;
 use smallvec::{smallvec, SmallVec};
 use std::{
     fmt::Write,
@@ -31,6 +32,8 @@ pub fn parse_input(reader: impl BufRead) -> Graph {
         ..Default::default()
     };
     graph.populate_neighbours();
+    graph.reorder_ids();
+    graph.populate_neighbours();
     graph.populate_branches();
     graph
 }
@@ -48,7 +51,9 @@ pub struct Graph {
     neighbours: Vec<u32>,
     neighbour_bits: Vec<Bits>,
     neighbour_indices: Vec<u32>,
+    masks: Vec<[u64; 4]>,
     vertices: u32,
+    id_map: Vec<u32>,
     branches: Vec<SmallVec<[(Bits, Bits); 3]>>,
 }
 
@@ -111,6 +116,7 @@ impl Graph {
                     _ => None,
                 })
         }
+        self.neighbour_indices.clear();
         for i in 1..=self.vertices {
             self.neighbour_indices.push(self.neighbours.len() as u32);
             for neighbour in neighbours(&self.edges, &i) {
@@ -124,13 +130,36 @@ impl Graph {
                 panic!();
             }
         }
+        self.masks.clear();
+        self.masks.push([0, 0, 0, 0]);
         for i in 1..=self.vertices {
             let mut bits = Bits::default();
             for n in self.neighbours(i) {
                 bits.set(*n as usize);
             }
             self.neighbour_bits.push(bits);
+            let mut mask = Bits::new();
+            mask.set(i as usize);
+            self.masks.push(unsafe { mask.as_u64s() });
         }
+    }
+
+    fn reorder_ids(&mut self) {
+        self.populate_neighbours();
+        let mut order: Vec<u32> = (1..=self.vertices).collect();
+
+        order.sort_by_key(|i| std::cmp::Reverse(self.neighbours(*i).len()));
+        let mut reverse_lookup = vec![0; order.len() + 1];
+        for (i, id) in order.iter().enumerate() {
+            reverse_lookup[*id as usize] = i + 1;
+        }
+
+        for (start, end) in self.edges.iter_mut() {
+            *start = reverse_lookup[*start as usize] as u32;
+            *end = reverse_lookup[*end as usize] as u32;
+        }
+
+        self.id_map = order;
     }
 
     fn neighbours(&self, vertex: u32) -> &[u32] {
@@ -262,11 +291,35 @@ impl Graph {
             vertices: &[u32],
             mut min: u32,
             ones: u32,
+            mut trailing_zeros_index: u8,
         ) -> (u32, Bits) {
             // dbg!(ones);
             debug_assert_eq!(ones, selected.count_ones());
             // eprintln!("{:?}", selected);
-            if vertices.is_empty() {
+
+            // iterate using trailing ones instruction and shuffle bit indices to match degree sorting
+            // let n = vertices[0];
+            // dbg!(ones);
+            if ones > min {
+                // eprintln!("aborting with {} selected elements", ones);
+                return (min + 1, selected);
+            }
+            // let vertices = &vertices[1..];
+            let finished_bytes = unsafe { (!finished).as_u64s() };
+            while finished_bytes[trailing_zeros_index as usize] == 0 {
+                trailing_zeros_index += 1;
+                if trailing_zeros_index == 4 {
+                    return (min + 1, selected);
+                }
+            }
+            // eprintln!("finsihed: {:?}", finished);
+            let trailing_zeros = finished_bytes[trailing_zeros_index as usize].trailing_zeros()
+                + trailing_zeros_index as u32 * 64;
+            let n = trailing_zeros;
+            // dbg!(trailing_zeros);
+            // if vertices.is_empty() {
+            // dbg!(n);
+            if n >= graph.vertices {
                 #[cfg(debug_assertions)]
                 let cover = Cover::from(selected);
                 // dbg!(ones);
@@ -274,20 +327,31 @@ impl Graph {
                 debug_assert!(graph.validate_cover(&cover));
                 return (ones, selected);
             }
-            let n = vertices[0];
-            // dbg!(ones);
-            let vertices = &vertices[1..];
-            if ones > min {
-                // eprintln!("aborting with {} selected elements", ones);
-                return (min + 1, selected);
-            }
-            if finished[n as usize] {
-                // eprintln!("skipping {n} because it is already covered");
-                return compute_cover_inner(graph, selected, finished, vertices, min, ones);
-            }
+            let mask = BitVec256::from_bit(trailing_zeros);
+            // let mask = unsafe { BitVec256::from_u64s(graph.masks[n as usize]) };
+            // if finished.get_mask(mask) {
+            //     // eprintln!("skipping {n} because it is already covered");
+            //     return compute_cover_inner(
+            //         graph,
+            //         selected,
+            //         finished,
+            //         vertices,
+            //         min,
+            //         ones,
+            //         leading_zeros_index,
+            //     );
+            // }
             if graph.neighbour_bits(n).and_not(&selected).is_zero() {
-                finished.set(n as usize);
-                return compute_cover_inner(graph, selected, finished, vertices, min, ones);
+                finished.set_mask(mask);
+                return compute_cover_inner(
+                    graph,
+                    selected,
+                    finished,
+                    vertices,
+                    min,
+                    ones,
+                    trailing_zeros_index,
+                );
             }
 
             let mut cover = selected;
@@ -307,6 +371,7 @@ impl Graph {
                     vertices,
                     min,
                     new_selection.count_ones(),
+                    trailing_zeros_index,
                 );
                 if result < min {
                     // eprintln!("updating min from {} to {}", min, result);
@@ -331,6 +396,7 @@ impl Graph {
             covered |= new_covered;
             selection |= new_selection;
         }
+        covered.set(0);
 
         let mut order: Vec<u32> = (1..=self.vertices).collect();
         // dbg!(selection.count_ones());
@@ -338,7 +404,8 @@ impl Graph {
         // let covered_vec: Vec<usize> = covered.iter_ones().collect();
         // eprintln!("covered: {:?}", &covered_vec);
 
-        order.sort_by_key(|i| std::cmp::Reverse(self.neighbours(*i).len()));
+        // order.sort_by_key(|i| std::cmp::Reverse(self.neighbours(*i).len()));
+        // dbg!(&order);
         let max = self.vertices.min(self.edges.len() as u32);
         let (min, vec) = compute_cover_inner(
             self,
@@ -347,6 +414,7 @@ impl Graph {
             &order,
             max,
             selection.count_ones() as u32,
+            0,
         );
         // dbg!(min);
         Cover::from(vec)

@@ -1,5 +1,5 @@
 use core::arch::x86_64::*;
-use std::ops::{BitAnd, BitOr, Not};
+use std::ops::{BitAnd, BitOr, BitOrAssign, Not};
 
 #[derive(Clone, Copy)]
 #[repr(C, align(32))]
@@ -97,7 +97,7 @@ impl BitVec256 {
     }
 
     #[inline]
-    unsafe fn as_u64s(&self) -> [u64; 4] {
+    pub unsafe fn as_u64s(&self) -> [u64; 4] {
         let mut arr = [0u64; 4];
         _mm256_storeu_si256(arr.as_mut_ptr() as *mut __m256i, self.simd);
         arr
@@ -113,10 +113,14 @@ impl BitVec256 {
 
             let array_idx = index / 64;
             let bit_idx = index % 64;
-            arr[array_idx as usize] |= 1u64 << bit_idx;
+            arr[array_idx] |= 1u64 << bit_idx;
 
             self.simd = _mm256_loadu_si256(arr.as_ptr() as *const __m256i);
         }
+    }
+    #[inline(never)]
+    pub fn set_mask(&mut self, index: Self) {
+        self.bitor_assign(index);
     }
 
     // Set a specific bit
@@ -129,7 +133,7 @@ impl BitVec256 {
 
             let array_idx = index / 64;
             let bit_idx = index % 64;
-            arr[array_idx as usize] &= !(1u64 << bit_idx);
+            arr[array_idx] &= !(1u64 << bit_idx);
 
             self.simd = _mm256_loadu_si256(arr.as_ptr() as *const __m256i);
         }
@@ -146,6 +150,10 @@ impl BitVec256 {
             let bit_idx = index % 64;
             (arr[array_idx] & (1u64 << bit_idx)) != 0
         }
+    }
+    #[inline(never)]
+    pub fn get_mask(self, index: Self) -> bool {
+        !(self & index).is_zero()
     }
 
     // Returns an iterator over set bits
@@ -186,8 +194,8 @@ impl BitVec256 {
     // }
 
     // Check if all bits are zero
-    // #[inline]
-    #[inline(never)]
+    #[inline]
+    // #[inline(never)]
     pub fn is_zero(&self) -> bool {
         unsafe {
             // Compare with zero
@@ -205,6 +213,17 @@ impl BitVec256 {
                 // Use ANDNOT instruction directly - this computes (!b & a) in one operation
                 simd: _mm256_andnot_si256(other.simd, self.simd),
             }
+        }
+    }
+
+    pub(crate) fn from_bit(n: u32) -> Self {
+        let mut arr = [0; 4];
+        let array_idx = n / 64;
+        let bit_idx = n % 64;
+        arr[array_idx as usize] |= 1u64 << bit_idx;
+
+        Self {
+            simd: unsafe { _mm256_loadu_si256(arr.as_ptr() as *const __m256i) },
         }
     }
 }
